@@ -927,6 +927,7 @@ G.__run_sunc = function()
   local delfolder = resolve("delfolder")
   if delfolder then pcall(delfolder, DIR) end
   H.test_begin(#tests)
+  X.quietLoad = true
   for _, t in ipairs(tests) do
     local fn = resolve(t.name)
     if fn == nil then
@@ -954,5 +955,6 @@ G.__run_sunc = function()
   end
   if delfolder then pcall(delfolder, DIR) end
   H.draw_flush()
+  X.quietLoad = false
   H.test_end()
 end
