@@ -760,7 +760,7 @@ class ExecutorEngine(private val app: Application) {
                 conn.connectTimeout = 15000
                 conn.readTimeout = 25000
                 conn.instanceFollowRedirects = true
-                conn.setRequestProperty("User-Agent", "ExecSim/1.0")
+                conn.setRequestProperty("User-Agent", "Roblox/WinInet")
                 if (headers.istable()) {
                     var k: LuaValue = LuaValue.NIL
                     while (true) {
