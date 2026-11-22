@@ -953,8 +953,8 @@ G.__run_sunc = function()
       end
     end
   end
+  X.quietLoad = false
   if delfolder then pcall(delfolder, DIR) end
   H.draw_flush()
-  X.quietLoad = false
   H.test_end()
 end

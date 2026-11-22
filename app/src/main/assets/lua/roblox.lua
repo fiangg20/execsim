@@ -211,27 +211,240 @@ function UD2.fromOffset(x, y) return UD2.new(0, x, 0, y) end
 function UD2.fromScale(x, y) return UD2.new(x, 0, y, 0) end
 
 local CF = {}
+do
 local CFm = {}
-local CFmt = newtype("CFrame", CFm, {})
-function CF.new(x, y, z)
-  if rawtype(x) == "table" and x.X then x, y, z = x.X, x.Y, x.Z end
-  x, y, z = x or 0, y or 0, z or 0
-  return setmetatable({ X = x, Y = y, Z = z, Position = V3.new(x, y, z), p = V3.new(x, y, z) }, CFmt)
-end
-CF.Angles = function() return CF.new(0, 0, 0) end
-CF.lookAt = function(at) return CF.new(at) end
-CF.identity = CF.new(0, 0, 0)
-function CFm.ToWorldSpace(a, b) return CF.new(a.X + b.X, a.Y + b.Y, a.Z + b.Z) end
-CFmt.__mul = function(a, b)
-  if rbxtypeOf(b) == "Vector3" then return V3.new(a.X + b.X, a.Y + b.Y, a.Z + b.Z) end
-  return CF.new(a.X + b.X, a.Y + b.Y, a.Z + b.Z)
-end
-CFmt.__add = function(a, b) return CF.new(a.X + b.X, a.Y + b.Y, a.Z + b.Z) end
-CFmt.__eq = function(a, b) return a.X == b.X and a.Y == b.Y and a.Z == b.Z end
-CFmt.__tostring = function(a) return a.X .. ", " .. a.Y .. ", " .. a.Z end
+local sin, cos, asin, acos = math.sin, math.cos, math.asin, math.acos
+local atan2 = math.atan2 or math.atan
+local function clamp1(x) if x > 1 then return 1 elseif x < -1 then return -1 end return x end
 
+local CFmt
+local function cfraw(x, y, z, a, b, c, d, e, f, g, h, i)
+  return setmetatable({ X = x, Y = y, Z = z, R00 = a, R01 = b, R02 = c, R10 = d, R11 = e, R12 = f, R20 = g, R21 = h, R22 = i }, CFmt)
+end
+
+local function cfLook(s) return V3.new(-s.R02, -s.R12, -s.R22) end
+local function cfRight(s) return V3.new(s.R00, s.R10, s.R20) end
+local function cfUp(s) return V3.new(s.R01, s.R11, s.R21) end
+CFmt = newtype("CFrame", CFm, {
+  Position = function(s) return V3.new(s.X, s.Y, s.Z) end,
+  p = function(s) return V3.new(s.X, s.Y, s.Z) end,
+  LookVector = cfLook, RightVector = cfRight, UpVector = cfUp,
+  XVector = cfRight, YVector = cfUp,
+  ZVector = function(s) return V3.new(s.R02, s.R12, s.R22) end,
+  Rotation = function(s) return cfraw(0, 0, 0, s.R00, s.R01, s.R02, s.R10, s.R11, s.R12, s.R20, s.R21, s.R22) end,
+})
+
+local function quatToCF(x, y, z, qx, qy, qz, qw)
+  local m = sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+  if m == 0 then return cfraw(x, y, z, 1, 0, 0, 0, 1, 0, 0, 0, 1) end
+  qx, qy, qz, qw = qx / m, qy / m, qz / m, qw / m
+  return cfraw(x, y, z,
+    1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw),
+    2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw),
+    2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy))
+end
+
+local function cfToQuat(s)
+  local t = s.R00 + s.R11 + s.R22
+  local qx, qy, qz, qw
+  if t > 0 then
+    local r = sqrt(1 + t)
+    qw = r / 2
+    qx = (s.R21 - s.R12) / (2 * r)
+    qy = (s.R02 - s.R20) / (2 * r)
+    qz = (s.R10 - s.R01) / (2 * r)
+  elseif s.R00 > s.R11 and s.R00 > s.R22 then
+    local r = sqrt(1 + s.R00 - s.R11 - s.R22)
+    qx = r / 2
+    qw = (s.R21 - s.R12) / (2 * r)
+    qy = (s.R01 + s.R10) / (2 * r)
+    qz = (s.R02 + s.R20) / (2 * r)
+  elseif s.R11 > s.R22 then
+    local r = sqrt(1 + s.R11 - s.R00 - s.R22)
+    qy = r / 2
+    qw = (s.R02 - s.R20) / (2 * r)
+    qx = (s.R01 + s.R10) / (2 * r)
+    qz = (s.R12 + s.R21) / (2 * r)
+  else
+    local r = sqrt(1 + s.R22 - s.R00 - s.R11)
+    qz = r / 2
+    qw = (s.R10 - s.R01) / (2 * r)
+    qx = (s.R02 + s.R20) / (2 * r)
+    qy = (s.R12 + s.R21) / (2 * r)
+  end
+  return qx, qy, qz, qw
+end
+
+local function cfMul(a, b)
+  return cfraw(
+    a.R00 * b.X + a.R01 * b.Y + a.R02 * b.Z + a.X,
+    a.R10 * b.X + a.R11 * b.Y + a.R12 * b.Z + a.Y,
+    a.R20 * b.X + a.R21 * b.Y + a.R22 * b.Z + a.Z,
+    a.R00 * b.R00 + a.R01 * b.R10 + a.R02 * b.R20, a.R00 * b.R01 + a.R01 * b.R11 + a.R02 * b.R21, a.R00 * b.R02 + a.R01 * b.R12 + a.R02 * b.R22,
+    a.R10 * b.R00 + a.R11 * b.R10 + a.R12 * b.R20, a.R10 * b.R01 + a.R11 * b.R11 + a.R12 * b.R21, a.R10 * b.R02 + a.R11 * b.R12 + a.R12 * b.R22,
+    a.R20 * b.R00 + a.R21 * b.R10 + a.R22 * b.R20, a.R20 * b.R01 + a.R21 * b.R11 + a.R22 * b.R21, a.R20 * b.R02 + a.R21 * b.R12 + a.R22 * b.R22)
+end
+
+local function cfVec(a, v)
+  return V3.new(
+    a.R00 * v.X + a.R01 * v.Y + a.R02 * v.Z + a.X,
+    a.R10 * v.X + a.R11 * v.Y + a.R12 * v.Z + a.Y,
+    a.R20 * v.X + a.R21 * v.Y + a.R22 * v.Z + a.Z)
+end
+
+local function cfInverse(s)
+  return cfraw(
+    -(s.R00 * s.X + s.R10 * s.Y + s.R20 * s.Z),
+    -(s.R01 * s.X + s.R11 * s.Y + s.R21 * s.Z),
+    -(s.R02 * s.X + s.R12 * s.Y + s.R22 * s.Z),
+    s.R00, s.R10, s.R20, s.R01, s.R11, s.R21, s.R02, s.R12, s.R22)
+end
+
+local function lookAtCF(pos, target, up)
+  up = up or V3.new(0, 1, 0)
+  local zx, zy, zz = pos.X - target.X, pos.Y - target.Y, pos.Z - target.Z
+  local zm = sqrt(zx * zx + zy * zy + zz * zz)
+  if zm == 0 then return cfraw(pos.X, pos.Y, pos.Z, 1, 0, 0, 0, 1, 0, 0, 0, 1) end
+  zx, zy, zz = zx / zm, zy / zm, zz / zm
+  local xx, xy, xz = up.Y * zz - up.Z * zy, up.Z * zx - up.X * zz, up.X * zy - up.Y * zx
+  local xm = sqrt(xx * xx + xy * xy + xz * xz)
+  if xm < 1e-9 then
+    -- looking straight along the up vector
+    if zy > 0 then xx, xy, xz = 0, 0, -1 else xx, xy, xz = 0, 0, 1 end
+    xm = 1
+  end
+  xx, xy, xz = xx / xm, xy / xm, xz / xm
+  local yx, yy, yz = zy * xz - zz * xy, zz * xx - zx * xz, zx * xy - zy * xx
+  return cfraw(pos.X, pos.Y, pos.Z, xx, yx, zx, xy, yy, zy, xz, yz, zz)
+end
+
+local function rotX(t) local c, s = cos(t), sin(t); return cfraw(0, 0, 0, 1, 0, 0, 0, c, -s, 0, s, c) end
+local function rotY(t) local c, s = cos(t), sin(t); return cfraw(0, 0, 0, c, 0, s, 0, 1, 0, -s, 0, c) end
+local function rotZ(t) local c, s = cos(t), sin(t); return cfraw(0, 0, 0, c, -s, 0, s, c, 0, 0, 0, 1) end
+
+function CF.new(x, y, z, a, b, c, d, e, f, g, h, i)
+  if x == nil then return cfraw(0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1) end
+  if rbxtypeOf(x) == "Vector3" then
+    if rbxtypeOf(y) == "Vector3" then return lookAtCF(x, y) end
+    return cfraw(x.X, x.Y, x.Z, 1, 0, 0, 0, 1, 0, 0, 0, 1)
+  end
+  if rawtype(x) ~= "number" then error("invalid argument #1 to 'new' (number expected, got " .. typeof(x) .. ")", 2) end
+  y, z = y or 0, z or 0
+  if a ~= nil and b == nil then error("invalid argument #5 to 'new' (number expected, got nil)", 2) end
+  if i ~= nil then return cfraw(x, y, z, a, b, c, d, e, f, g, h, i) end
+  if d ~= nil then return quatToCF(x, y, z, a, b, c, d) end
+  return cfraw(x, y, z, 1, 0, 0, 0, 1, 0, 0, 0, 1)
+end
+function CF.Angles(rx, ry, rz) return cfMul(cfMul(rotX(rx or 0), rotY(ry or 0)), rotZ(rz or 0)) end
+CF.fromEulerAnglesXYZ = CF.Angles
+function CF.fromEulerAnglesYXZ(rx, ry, rz) return cfMul(cfMul(rotY(ry or 0), rotX(rx or 0)), rotZ(rz or 0)) end
+CF.fromOrientation = CF.fromEulerAnglesYXZ
+function CF.lookAt(at, look, up) return lookAtCF(at, look, up) end
+function CF.fromAxisAngle(axis, ang)
+  local m = sqrt(axis.X * axis.X + axis.Y * axis.Y + axis.Z * axis.Z)
+  if m == 0 then return CF.new() end
+  local x, y, z = axis.X / m, axis.Y / m, axis.Z / m
+  local c, s = cos(ang), sin(ang)
+  local t = 1 - c
+  return cfraw(0, 0, 0,
+    t * x * x + c, t * x * y - s * z, t * x * z + s * y,
+    t * x * y + s * z, t * y * y + c, t * y * z - s * x,
+    t * x * z - s * y, t * y * z + s * x, t * z * z + c)
+end
+function CF.fromMatrix(pos, vx, vy, vz)
+  vz = vz or vx:Cross(vy)
+  return cfraw(pos.X, pos.Y, pos.Z, vx.X, vy.X, vz.X, vx.Y, vy.Y, vz.Y, vx.Z, vy.Z, vz.Z)
+end
+CF.identity = CF.new()
+
+function CFm.Inverse(s) return cfInverse(s) end
+function CFm.ToWorldSpace(a, b) return cfMul(a, b) end
+function CFm.ToObjectSpace(a, b) return cfMul(cfInverse(a), b) end
+function CFm.PointToWorldSpace(a, v) return cfVec(a, v) end
+function CFm.PointToObjectSpace(a, v) return cfVec(cfInverse(a), v) end
+function CFm.VectorToWorldSpace(a, v)
+  return V3.new(a.R00 * v.X + a.R01 * v.Y + a.R02 * v.Z, a.R10 * v.X + a.R11 * v.Y + a.R12 * v.Z, a.R20 * v.X + a.R21 * v.Y + a.R22 * v.Z)
+end
+function CFm.VectorToObjectSpace(a, v)
+  return V3.new(a.R00 * v.X + a.R10 * v.Y + a.R20 * v.Z, a.R01 * v.X + a.R11 * v.Y + a.R21 * v.Z, a.R02 * v.X + a.R12 * v.Y + a.R22 * v.Z)
+end
+CFm.toWorldSpace = CFm.ToWorldSpace; CFm.toObjectSpace = CFm.ToObjectSpace
+CFm.pointToWorldSpace = CFm.PointToWorldSpace; CFm.pointToObjectSpace = CFm.PointToObjectSpace
+CFm.vectorToWorldSpace = CFm.VectorToWorldSpace; CFm.vectorToObjectSpace = CFm.VectorToObjectSpace
+function CFm.GetComponents(s)
+  return s.X, s.Y, s.Z, s.R00, s.R01, s.R02, s.R10, s.R11, s.R12, s.R20, s.R21, s.R22
+end
+CFm.components = CFm.GetComponents
+function CFm.ToEulerAnglesXYZ(s)
+  return atan2(-s.R12, s.R22), asin(clamp1(s.R02)), atan2(-s.R01, s.R00)
+end
+CFm.ToEulerAngles = CFm.ToEulerAnglesXYZ
+function CFm.ToEulerAnglesYXZ(s)
+  return asin(clamp1(-s.R12)), atan2(s.R02, s.R22), atan2(s.R10, s.R11)
+end
+CFm.ToOrientation = CFm.ToEulerAnglesYXZ
+function CFm.ToAxisAngle(s)
+  local qx, qy, qz, qw = cfToQuat(s)
+  if qw < 0 then qx, qy, qz, qw = -qx, -qy, -qz, -qw end
+  local ang = 2 * acos(clamp1(qw))
+  local sn = sqrt(1 - qw * qw)
+  if sn < 1e-6 then return V3.new(1, 0, 0), 0 end
+  return V3.new(qx / sn, qy / sn, qz / sn), ang
+end
+function CFm.Lerp(a, b, t)
+  local ax, ay, az, aw = cfToQuat(a)
+  local bx, by, bz, bw = cfToQuat(b)
+  local dot = ax * bx + ay * by + az * bz + aw * bw
+  if dot < 0 then bx, by, bz, bw, dot = -bx, -by, -bz, -bw, -dot end
+  local k0, k1
+  if dot > 0.9995 then
+    k0, k1 = 1 - t, t
+  else
+    local th = acos(clamp1(dot))
+    local sn = sin(th)
+    k0, k1 = sin((1 - t) * th) / sn, sin(t * th) / sn
+  end
+  return quatToCF(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t, a.Z + (b.Z - a.Z) * t,
+    ax * k0 + bx * k1, ay * k0 + by * k1, az * k0 + bz * k1, aw * k0 + bw * k1)
+end
+function CFm.FuzzyEq(a, b, e)
+  e = e or 1e-5
+  local function eq(x, y) return math.abs(x - y) <= e end
+  return eq(a.X, b.X) and eq(a.Y, b.Y) and eq(a.Z, b.Z) and eq(a.R00, b.R00) and eq(a.R01, b.R01) and eq(a.R02, b.R02)
+    and eq(a.R10, b.R10) and eq(a.R11, b.R11) and eq(a.R12, b.R12) and eq(a.R20, b.R20) and eq(a.R21, b.R21) and eq(a.R22, b.R22)
+end
+function CFm.Orthonormalize(s) return s end
+
+CFmt.__mul = function(a, b)
+  local tb = rbxtypeOf(b)
+  if tb == "Vector3" then return cfVec(a, b) end
+  if tb ~= "CFrame" then error("attempt to multiply a CFrame with an incompatible value type or nil", 2) end
+  return cfMul(a, b)
+end
+CFmt.__add = function(a, b)
+  if rbxtypeOf(b) ~= "Vector3" then error("attempt to add a CFrame with an incompatible value type or nil", 2) end
+  return cfraw(a.X + b.X, a.Y + b.Y, a.Z + b.Z, a.R00, a.R01, a.R02, a.R10, a.R11, a.R12, a.R20, a.R21, a.R22)
+end
+CFmt.__sub = function(a, b)
+  if rbxtypeOf(b) ~= "Vector3" then error("attempt to subtract a CFrame with an incompatible value type or nil", 2) end
+  return cfraw(a.X - b.X, a.Y - b.Y, a.Z - b.Z, a.R00, a.R01, a.R02, a.R10, a.R11, a.R12, a.R20, a.R21, a.R22)
+end
+CFmt.__eq = function(a, b)
+  return a.X == b.X and a.Y == b.Y and a.Z == b.Z and a.R00 == b.R00 and a.R01 == b.R01 and a.R02 == b.R02
+    and a.R10 == b.R10 and a.R11 == b.R11 and a.R12 == b.R12 and a.R20 == b.R20 and a.R21 == b.R21 and a.R22 == b.R22
+end
+CFmt.__tostring = function(a)
+  return table.concat({ a.X, a.Y, a.Z, a.R00, a.R01, a.R02, a.R10, a.R11, a.R12, a.R20, a.R21, a.R22 }, ", ")
+end
+X.CFmath = { mul = cfMul, vec = cfVec, inverse = cfInverse, lookAt = lookAtCF, rotX = rotX, rotY = rotY, rotZ = rotZ }
+end
+
+local EnumItemMT = {
+  __rbxtype = "EnumItem",
+  __tostring = function(it) return "Enum." .. tostring(it.EnumType) .. "." .. tostring(it.Name) end,
+}
 local function enumItem(enum, name)
-  return { Name = name, Value = 0, EnumType = enum }
+  return setmetatable({ Name = name, Value = 0, EnumType = enum }, EnumItemMT)
 end
 local EnumMT
 EnumMT = {
@@ -317,6 +530,11 @@ local function step()
   local dt = t - Sched.lastFrame
   if dt >= 1 / 60 then
     Sched.lastFrame = t
+    if dt > 0.1 then dt = 0.1 end
+    if X.worldStep then
+      local okw, errw = pcall(X.worldStep, dt)
+      if not okw then H.log("error", "[world] " .. tostring(errw)) end
+    end
     for _, name in ipairs({ "Heartbeat", "RenderStepped", "Stepped", "PreRender", "PreSimulation", "PostSimulation" }) do
       local sig = FrameSignals[name]
       if sig and #sig.__conns > 0 then X.fire(sig, dt) end
@@ -368,7 +586,7 @@ X.THREADS = setmetatable({}, { __mode = "k" })
 
 local task = {}
 function task.wait(n)
-  n = n or 0.03
+  if rawtype(n) ~= "number" or n < 1 / 60 then n = 1 / 60 end
   return blockUntil(nil, n)
 end
 function task.spawn(f, ...)
@@ -514,6 +732,7 @@ local CM = {}           -- class specific methods
 local NAMECALL = ""
 X.getNamecall = function() return NAMECALL end
 X.setNamecall = function(n) NAMECALL = n end
+X.PropHooks = {}   -- property name -> function(data, newValue, oldValue)
 local WRAPS = {}
 
 local BASE = {
@@ -953,6 +1172,8 @@ InstMT.__newindex = function(self, key, value)
   end
   local old = d.props[key]
   d.props[key] = value
+  local hook = X.PropHooks[key]
+  if hook then hook(d, value, old) end
   if old ~= value then
     X.fire(d.signals.Changed, key)
     if d.propsig[key] then X.fire(d.propsig[key]) end
@@ -1757,3 +1978,8 @@ end
 RENV._G = SHARED
 RENV.debug = { traceback = dbg.traceback, getinfo = dbg.getinfo }
 X.SHARED = SHARED
+X.CM, X.Methods, X.mk, X.GetService = CM, Methods, mk, GetService
+X.V3, X.V2, X.C3, X.CF, X.DEFAULTS, X.BASE = V3, V2, C3, CF, DEFAULTS, BASE
+X.char, X.hrp, X.hum, X.head, X.camera = char, hrp, hum, head, camera
+X.Lighting, X.Players, X.spawnLoc, X.baseplate = Lighting, Players, spawn, base
+X.EVENTS = EVENTS

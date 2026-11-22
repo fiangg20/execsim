@@ -97,11 +97,11 @@ class SimViewModel(app: Application) : AndroidViewModel(app) {
     val engine = ExecutorEngine(app)
 }
 
-private val Accent = Color(0xFF00E5A8)
-private val Bad = Color(0xFFFF6B6B)
-private val Warn = Color(0xFFFFC857)
+internal val Accent = Color(0xFF00E5A8)
+internal val Bad = Color(0xFFFF6B6B)
+internal val Warn = Color(0xFFFFC857)
 private val Miss = Color(0xFFB388FF)
-private val Muted = Color(0xFF8B95A7)
+internal val Muted = Color(0xFF8B95A7)
 
 private val DarkScheme = darkColorScheme(
     primary = Accent,
@@ -141,7 +141,7 @@ private fun AppRoot(engine: ExecutorEngine) {
         Tab("Run", Icons.Filled.PlayArrow),
         Tab("sUNC", Icons.Filled.Science),
         Tab("Functions", Icons.AutoMirrored.Filled.List),
-        Tab("Screen", Icons.Filled.Dashboard),
+        Tab("Game", Icons.Filled.Dashboard),
         Tab("Settings", Icons.Filled.Settings),
     )
     var selected by rememberSaveable { mutableIntStateOf(0) }
@@ -170,7 +170,7 @@ private fun AppRoot(engine: ExecutorEngine) {
                 0 -> RunScreen(engine)
                 1 -> SuncScreen(engine)
                 2 -> FunctionsScreen(engine)
-                3 -> ScreenScreen(engine)
+                3 -> GameScreen(engine)
                 else -> SettingsScreen(engine)
             }
         }
@@ -581,112 +581,6 @@ private fun FunctionsScreen(engine: ExecutorEngine) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
             }
         }
-    }
-}
-
-// ---------------------------------------------------------------------
-// Screen (Drawing API preview)
-// ---------------------------------------------------------------------
-
-private fun vecOf(p: Map<String, Any?>, key: String): Offset {
-    val l = p[key] as? List<*> ?: return Offset.Zero
-    val x = (l.getOrNull(0) as? Double) ?: 0.0
-    val y = (l.getOrNull(1) as? Double) ?: 0.0
-    return Offset(x.toFloat(), y.toFloat())
-}
-
-private fun numOf(p: Map<String, Any?>, key: String, def: Float): Float =
-    ((p[key] as? Double) ?: def.toDouble()).toFloat()
-
-private fun colorOf(p: Map<String, Any?>, key: String = "Color"): Color {
-    val l = p[key] as? List<*>
-    val r = ((l?.getOrNull(0) as? Double) ?: 0.0).toFloat().coerceIn(0f, 1f)
-    val g = ((l?.getOrNull(1) as? Double) ?: 0.0).toFloat().coerceIn(0f, 1f)
-    val b = ((l?.getOrNull(2) as? Double) ?: 0.0).toFloat().coerceIn(0f, 1f)
-    val a = numOf(p, "Transparency", 1f).coerceIn(0f, 1f)
-    return Color(r, g, b, a)
-}
-
-@Composable
-private fun ScreenScreen(engine: ExecutorEngine) {
-    val objs by engine.drawings.collectAsState()
-    val cursor by engine.cursor.collectAsState()
-    val density = LocalDensity.current.density
-
-    Column(
-        Modifier
-            .fillMaxSize()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("Screen", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text(
-                    "${objs.size} Drawing objects  -  cursor ${cursor.x.toInt()}, ${cursor.y.toInt()}" +
-                        (if (cursor.left) "  [LMB]" else "") + (if (cursor.right) "  [RMB]" else ""),
-                    color = Muted,
-                    fontSize = 12.sp,
-                )
-            }
-            IconTextButton(Icons.Filled.Delete, "Clear") { engine.clearDrawings() }
-        }
-        Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF05070B)),
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-        ) {
-            Canvas(Modifier.fillMaxSize()) {
-                val s = density
-                for (o in objs.sortedBy { (it.props["ZIndex"] as? Double) ?: 0.0 }) {
-                    if (o.props["Visible"] != true) continue
-                    val p = o.props
-                    val col = colorOf(p)
-                    val thick = numOf(p, "Thickness", 1f) * s
-                    val filled = p["Filled"] == true
-                    val style = if (filled) Fill else Stroke(width = thick)
-                    when (o.type) {
-                        "Line" -> drawLine(col, vecOf(p, "From") * s, vecOf(p, "To") * s, strokeWidth = thick)
-                        "Square" -> drawRect(col, vecOf(p, "Position") * s, Size(vecOf(p, "Size").x * s, vecOf(p, "Size").y * s), style = style)
-                        "Circle" -> drawCircle(col, numOf(p, "Radius", 0f) * s, vecOf(p, "Position") * s, style = style)
-                        "Triangle", "Quad" -> {
-                            val path = Path()
-                            val keys = if (o.type == "Triangle") listOf("PointA", "PointB", "PointC") else listOf("PointA", "PointB", "PointC", "PointD")
-                            keys.forEachIndexed { i, k ->
-                                val pt = vecOf(p, k) * s
-                                if (i == 0) path.moveTo(pt.x, pt.y) else path.lineTo(pt.x, pt.y)
-                            }
-                            path.close()
-                            drawPath(path, col, style = style)
-                        }
-                        "Text" -> {
-                            val paint = Paint().apply {
-                                isAntiAlias = true
-                                color = col.toArgb()
-                                textSize = numOf(p, "Size", 14f) * s
-                                textAlign = if (p["Center"] == true) Paint.Align.CENTER else Paint.Align.LEFT
-                            }
-                            val pos = vecOf(p, "Position") * s
-                            drawContext.canvas.nativeCanvas.drawText((p["Text"] as? String) ?: "", pos.x, pos.y + paint.textSize, paint)
-                        }
-                        "Image" -> {
-                            val pos = vecOf(p, "Position") * s
-                            drawRect(Color(0xFF3A4455), pos, Size(vecOf(p, "Size").x * s, vecOf(p, "Size").y * s), style = Stroke(width = 2f))
-                        }
-                    }
-                }
-                // virtual mouse cursor
-                val c = Offset(cursor.x * s, cursor.y * s)
-                drawCircle(Color.White.copy(alpha = 0.9f), 6f * s, c)
-                drawCircle(if (cursor.left || cursor.right) Accent else Color.White.copy(alpha = 0.4f), 12f * s, c, style = Stroke(width = 2f * s))
-            }
-        }
-        Text(
-            "Scripts that use Drawing.new(...) render here. mousemoveabs / mouse1click move and flash the virtual cursor.",
-            color = Muted,
-            fontSize = 11.sp,
-        )
     }
 }
 

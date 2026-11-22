@@ -24,10 +24,12 @@ import java.net.URL
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
@@ -36,6 +38,36 @@ import javax.crypto.spec.SecretKeySpec
 data class ConsoleLine(val kind: String, val text: String, val time: Long = System.currentTimeMillis())
 
 data class DrawObj(val id: Int, val type: String, val props: Map<String, Any?>)
+
+/** One Part of the simulated game world (from world.lua __snapshot). */
+class WPart(
+    val id: Int,
+    val name: String,
+    val cls: String,
+    val pos: FloatArray,
+    val size: FloatArray,
+    val rot: FloatArray,
+    val r: Float,
+    val g: Float,
+    val b: Float,
+    val transparency: Float,
+    val flags: Int,
+    val shape: Int,
+)
+
+class WorldSnapshot(
+    val cam: FloatArray = floatArrayOf(0f, 10f, 14f, 1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f, 70f),
+    val parts: List<WPart> = emptyList(),
+    val health: Float = 100f,
+    val maxHealth: Float = 100f,
+    val state: String = "Running",
+    val dead: Boolean = false,
+    val clock: Float = 14f,
+)
+
+data class ExplorerRow(val depth: Int, val id: Int, val cls: String, val name: String, val hasChildren: Boolean)
+
+data class PropRow(val name: String, val type: String, val value: String, val editable: Boolean)
 
 data class CursorState(
     val x: Float = 200f,
@@ -112,6 +144,30 @@ class ExecutorEngine(private val app: Application) {
     @Volatile
     private var apiActive = ""
 
+    // ---- simulated game world (Game tab) ---------------------------------
+    private val _world = MutableStateFlow(WorldSnapshot())
+    val world: StateFlow<WorldSnapshot> = _world.asStateFlow()
+
+    private val _explorer = MutableStateFlow<List<ExplorerRow>>(emptyList())
+    val explorer: StateFlow<List<ExplorerRow>> = _explorer.asStateFlow()
+
+    private val _props = MutableStateFlow<List<PropRow>>(emptyList())
+    val props: StateFlow<List<PropRow>> = _props.asStateFlow()
+
+    @Volatile private var joyX = 0f
+    @Volatile private var joyY = 0f
+    @Volatile private var jumpReq = false
+    @Volatile private var camYaw = 0.6f
+    @Volatile private var camPitch = 0.35f
+    @Volatile private var camDist = 14f
+    @Volatile private var viewW = 800f
+    @Volatile private var viewH = 450f
+    @Volatile private var tickMs = 50L
+    @Volatile private var tickErrLogged = false
+    private val uiJobs = ConcurrentLinkedQueue<() -> Unit>()
+    private val snapPending = AtomicBoolean(false)
+    private val tickPending = AtomicBoolean(false)
+
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> = _busy.asStateFlow()
 
@@ -138,6 +194,7 @@ class ExecutorEngine(private val app: Application) {
     init {
         boot()
         startApiWatcher()
+        startTicker()
     }
 
     // ------------------------------------------------------------------
@@ -210,12 +267,12 @@ class ExecutorEngine(private val app: Application) {
             log("error", "[api dump] " + (t.message ?: t.toString()))
         }
 
-        for (name in listOf("roblox", "unc_core", "unc_sys", "unc_drawing", "sunc_tests")) {
+        for (name in listOf("roblox", "world", "unc_core", "unc_sys", "unc_drawing", "sunc_tests")) {
             try {
                 val text = app.assets.open("lua/$name.lua").bufferedReader().use { it.readText() }
                 // chunk names matter: "game_*" = simulated Roblox code, "exec_*" = executor natives
                 val chunk = when (name) {
-                    "roblox" -> "game_env"
+                    "roblox", "world" -> "game_env"
                     "sunc_tests" -> "executor_tests"
                     else -> "exec_$name"
                 }
@@ -375,6 +432,205 @@ class ExecutorEngine(private val app: Application) {
         log("system", "stop requested - rebuilding environment")
         globals = null
         boot()
+    }
+
+    // ------------------------------------------------------------------
+    // simulated game world
+    // ------------------------------------------------------------------
+
+    private fun drainJobs() {
+        while (true) {
+            val job = uiJobs.poll() ?: break
+            try {
+                job()
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    /** Runs [job] on the Lua thread: either on the idle worker or between frames of a running script. */
+    private fun postLua(job: () -> Unit) {
+        uiJobs.add(job)
+        try {
+            worker.submit { drainJobs() }
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun startTicker() {
+        Thread {
+            while (true) {
+                try {
+                    Thread.sleep(tickMs)
+                } catch (_: InterruptedException) {
+                    return@Thread
+                }
+                if (_busy.value || globals == null) continue
+                if (!tickPending.compareAndSet(false, true)) continue
+                try {
+                    worker.submit {
+                        try {
+                            val g = globals
+                            val f = g?.get("__tick")
+                            if (g != null && f != null && f.isfunction() && !_busy.value) {
+                                f.call()
+                                maybeFlushDrawings()
+                            }
+                        } catch (t: Throwable) {
+                            if (!tickErrLogged) {
+                                tickErrLogged = true
+                                log("error", "[world] " + (t.message ?: t.toString()))
+                            }
+                        } finally {
+                            tickPending.set(false)
+                        }
+                    }
+                } catch (_: Throwable) {
+                    tickPending.set(false)
+                }
+            }
+        }.apply {
+            isDaemon = true
+            name = "world-ticker"
+        }.start()
+    }
+
+    fun setGameVisible(visible: Boolean) {
+        tickMs = if (visible) 33L else 50L
+    }
+
+    fun setJoystick(x: Float, y: Float) {
+        joyX = x
+        joyY = y
+    }
+
+    fun requestJump() {
+        jumpReq = true
+    }
+
+    fun setCamera(yaw: Float, pitch: Float, dist: Float) {
+        camYaw = yaw
+        camPitch = pitch
+        camDist = dist
+    }
+
+    fun setViewSize(w: Float, h: Float) {
+        viewW = w
+        viewH = h
+    }
+
+    fun requestSnapshot() {
+        if (!snapPending.compareAndSet(false, true)) return
+        postLua {
+            try {
+                val g = globals
+                if (g != null) {
+                    val f = g.get("__snapshot")
+                    if (f.isfunction()) _world.value = parseSnapshot(f.call().tojstring())
+                }
+            } finally {
+                snapPending.set(false)
+            }
+        }
+    }
+
+    fun requestExplorer(expanded: Set<Int>) {
+        postLua {
+            val g = globals ?: return@postLua
+            val f = g.get("__explorer")
+            if (!f.isfunction()) return@postLua
+            val text = f.call(LuaValue.valueOf(expanded.joinToString(","))).tojstring()
+            val rows = ArrayList<ExplorerRow>()
+            for (line in text.split('\n')) {
+                if (line.isEmpty()) continue
+                val p = line.split('\t')
+                if (p.size < 5) continue
+                rows.add(ExplorerRow(p[0].toIntOrNull() ?: 0, p[1].toIntOrNull() ?: 0, p[2], p[3], p[4] == "1"))
+            }
+            _explorer.value = rows
+        }
+    }
+
+    fun requestProps(id: Int) {
+        postLua {
+            val g = globals ?: return@postLua
+            val f = g.get("__props")
+            if (!f.isfunction()) return@postLua
+            val text = f.call(LuaValue.valueOf(id)).tojstring()
+            val rows = ArrayList<PropRow>()
+            for (line in text.split('\n')) {
+                if (line.isEmpty()) continue
+                val p = line.split('\t')
+                if (p.size < 4) continue
+                rows.add(PropRow(p[0], p[1], p[2], p[3] == "1"))
+            }
+            _props.value = rows
+        }
+    }
+
+    fun setProp(id: Int, name: String, value: String) {
+        postLua {
+            val g = globals ?: return@postLua
+            val f = g.get("__setprop")
+            if (!f.isfunction()) return@postLua
+            val r = f.invoke(LuaValue.valueOf(id), LuaValue.valueOf(name), LuaValue.valueOf(value))
+            if (!r.arg1().toboolean()) {
+                log("error", "[properties] $name: " + r.arg(2).tojstring())
+            }
+        }
+        requestProps(id)
+    }
+
+    fun deleteInstance(id: Int) {
+        postLua {
+            val g = globals ?: return@postLua
+            val f = g.get("__delete")
+            if (f.isfunction()) f.call(LuaValue.valueOf(id))
+        }
+    }
+
+    private fun parseSnapshot(text: String): WorldSnapshot {
+        var cam = floatArrayOf(0f, 10f, 14f, 1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f, 70f)
+        var health = 100f
+        var maxHealth = 100f
+        var state = "Running"
+        var dead = false
+        var clock = 14f
+        val parts = ArrayList<WPart>()
+        for (line in text.split('\n')) {
+            if (line.isEmpty()) continue
+            val f = line.split('\t')
+            when (f[0]) {
+                "C" -> if (f.size >= 14) cam = FloatArray(13) { f[it + 1].toFloatOrNull() ?: 0f }
+                "S" -> if (f.size >= 5) {
+                    health = f[1].toFloatOrNull() ?: 100f
+                    maxHealth = f[2].toFloatOrNull() ?: 100f
+                    state = f[3]
+                    dead = f[4] == "1"
+                }
+                "L" -> if (f.size >= 2) clock = f[1].toFloatOrNull() ?: 14f
+                "P" -> if (f.size >= 25) {
+                    fun n(i: Int): Float = f[i].toFloatOrNull() ?: 0f
+                    parts.add(
+                        WPart(
+                            id = f[1].toIntOrNull() ?: 0,
+                            name = f[2],
+                            cls = f[3],
+                            pos = floatArrayOf(n(4), n(5), n(6)),
+                            size = floatArrayOf(n(7), n(8), n(9)),
+                            rot = FloatArray(9) { n(10 + it) },
+                            r = n(19),
+                            g = n(20),
+                            b = n(21),
+                            transparency = n(22),
+                            flags = f[23].toIntOrNull() ?: 0,
+                            shape = f[24].toIntOrNull() ?: 0,
+                        ),
+                    )
+                }
+            }
+        }
+        return WorldSnapshot(cam, parts, health, maxHealth, state, dead, clock)
     }
 
     fun clearConsole() {
@@ -573,6 +829,7 @@ class ExecutorEngine(private val app: Application) {
                 }
                 remaining -= slice
             }
+            drainJobs()
             if (Thread.currentThread().isInterrupted) throw LuaError("script stopped")
             LuaValue.NONE
         }
@@ -852,6 +1109,26 @@ class ExecutorEngine(private val app: Application) {
         host.def("cursor") { _ ->
             val c = _cursor.value
             LuaValue.varargsOf(LuaValue.valueOf(c.x.toDouble()), LuaValue.valueOf(c.y.toDouble()))
+        }
+
+        host.def("moveinput") { _ ->
+            val jump = jumpReq
+            jumpReq = false
+            LuaValue.varargsOf(
+                LuaValue.valueOf(joyX.toDouble()),
+                LuaValue.valueOf(joyY.toDouble()),
+                LuaValue.valueOf(jump),
+            )
+        }
+        host.def("camera") { _ ->
+            LuaValue.varargsOf(
+                LuaValue.valueOf(camYaw.toDouble()),
+                LuaValue.valueOf(camPitch.toDouble()),
+                LuaValue.valueOf(camDist.toDouble()),
+            )
+        }
+        host.def("vsize") { _ ->
+            LuaValue.varargsOf(LuaValue.valueOf(viewW.toDouble()), LuaValue.valueOf(viewH.toDouble()))
         }
 
         // ---- drawing ---------------------------------------------------
