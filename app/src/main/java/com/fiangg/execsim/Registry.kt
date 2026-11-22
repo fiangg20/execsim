@@ -2,7 +2,7 @@ package com.fiangg.execsim
 
 /**
  * Single source of truth for every UNC / sUNC function this simulator provides.
- * The Lua side (assets/lua/*.lua) defines each of these; the UI and the
+ * The Lua side (the Lua files in assets/lua) defines each of these; the UI and the
  * coverage check read this list.
  */
 data class FnEntry(
