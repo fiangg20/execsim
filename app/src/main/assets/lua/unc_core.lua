@@ -176,7 +176,19 @@ def("getcallingscript", function() return X.currentScript end)
 def("loadstring", function(code, chunkname)
   if rawtype(code) ~= "string" then argError(1, "loadstring", "string", code) end
   local fn, err = load(H.luau(code), "executor_chunk", "t", G)
-  if not fn then return nil, err end
+  if not fn then
+    if not X.quietLoad then
+      local hint = ""
+      local head = code:sub(1, 200):lower()
+      if head:find("<!doctype", 1, true) or head:find("<html", 1, true) then
+        hint = " (the text is an HTML page, not Lua: the server probably needs a Roblox User-Agent or a raw URL)"
+      elseif #code == 0 then
+        hint = " (the text is empty)"
+      end
+      H.log("warn", "[loadstring] compile failed: " .. tostring(err) .. hint)
+    end
+    return nil, err
+  end
   return fn
 end)
 
